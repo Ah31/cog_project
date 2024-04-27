@@ -1,0 +1,81 @@
+{
+  "algorithm": "IQL",
+  "algorithm_kwargs": {
+    "batch_size": 256,
+    "max_path_length": 40,
+    "min_num_steps_before_training": 1000,
+    "num_epochs": 3000,
+    "num_eval_steps_per_epoch": 200,
+    "num_expl_steps_per_train_loop": 1000,
+    "num_trains_per_train_loop": 1000
+  },
+  "cnn_params": {
+    "hidden_sizes": [
+      1024,
+      512,
+      256
+    ],
+    "image_augmentation": true,
+    "image_augmentation_padding": 4,
+    "kernel_sizes": [
+      3,
+      3,
+      3
+    ],
+    "n_channels": [
+      16,
+      16,
+      16
+    ],
+    "paddings": [
+      1,
+      1,
+      1
+    ],
+    "pool_paddings": [
+      0,
+      0,
+      0
+    ],
+    "pool_sizes": [
+      2,
+      2,
+      1
+    ],
+    "pool_strides": [
+      2,
+      2,
+      1
+    ],
+    "pool_type": "max2d",
+    "strides": [
+      1,
+      1,
+      1
+    ]
+  },
+  "dump_video_kwargs": {
+    "imsize": 48,
+    "save_video_period": 1
+  },
+  "env": "Widow250PickTray-v0",
+  "prior_buffer": "pickplace_prior.npy",
+  "seed": 10,
+  "task_buffer": "pickplace_task.npy",
+  "trainer_kwargs": {
+    "beta": 0.3333333333333333,
+    "clip_score": 100,
+    "discount": 0.99,
+    "policy_lr": 0.0003,
+    "policy_weight_decay": 0,
+    "q_weight_decay": 0,
+    "qf_lr": 0.0003,
+    "quantile": 0.7,
+    "reward_scale": 1,
+    "reward_transform_kwargs": null,
+    "soft_target_tau": 0.005,
+    "terminal_transform_kwargs": null
+  },
+  "use_positive_rew": false,
+  "version": "normal"
+}
