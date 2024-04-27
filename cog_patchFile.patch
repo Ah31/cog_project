@@ -1,0 +1,1117 @@
+diff --git a/rlkit/core/batch_rl_algorithm.py b/rlkit/core/batch_rl_algorithm.py
+index b622797..d536b63 100644
+--- a/rlkit/core/batch_rl_algorithm.py
++++ b/rlkit/core/batch_rl_algorithm.py
+@@ -107,7 +107,7 @@ class BatchRLAlgorithm(BaseRLAlgorithm, metaclass=abc.ABCMeta):
+         ones = np.eye(q_vector.shape[1])
+         return ptu.get_numpy(action).flatten()
+ 
+-    def _train(self):
++    def _train(self, comet_logger):
+         if self.min_num_steps_before_training > 0 and not self.batch_rl:
+             init_expl_paths = self.expl_data_collector.collect_new_paths(
+                 self.max_path_length,
+@@ -119,6 +119,8 @@ class BatchRLAlgorithm(BaseRLAlgorithm, metaclass=abc.ABCMeta):
+             self.replay_buffer.add_paths_from_mdp(init_expl_paths)
+             self.expl_data_collector.end_epoch(-1)
+ 
++        mean = None
++        std = None
+         for epoch in gt.timed_for(
+                 range(self._start_epoch, self.num_epochs),
+                 save_itrs=True,
+@@ -137,10 +139,11 @@ class BatchRLAlgorithm(BaseRLAlgorithm, metaclass=abc.ABCMeta):
+                 self.eval_data_collector.collect_new_paths(
+                     self.max_path_length,
+                     self.num_eval_steps_per_epoch,
+-                    discard_incomplete_paths=True,
++                    discard_incomplete_paths=True, mean=mean, std=std
+                 )
+             gt.stamp('evaluation sampling')
+-
++            # mean = []
++            # std = []
+             for _ in range(self.num_train_loops_per_epoch):
+                 if not self.batch_rl:
+                     # Sample new paths only if not doing batch rl
+@@ -171,13 +174,21 @@ class BatchRLAlgorithm(BaseRLAlgorithm, metaclass=abc.ABCMeta):
+ 
+                 self.training_mode(True)
+                 for _ in range(self.num_trains_per_train_loop):
++                    # train_data, m, s = self.replay_buffer.random_batch(
++                    #     self.batch_size)
++                    # mean.append(m)
++                    # std.append(s)
+                     train_data = self.replay_buffer.random_batch(
+                         self.batch_size)
+                     self.trainer.train(train_data)
++
++                # mean = np.mean(mean, axis=0)
++                # std = np.mean(std, axis=0)
++
+                 gt.stamp('training', unique=False)
+                 self.training_mode(False)
+ 
+-            self._end_epoch(epoch)
++            self._end_epoch(epoch, comet_logger)
+ 
+             # import ipdb; ipdb.set_trace()
+             ## After epoch visualize
+diff --git a/rlkit/core/logging.py b/rlkit/core/logging.py
+index 3aa9497..cbc4d0b 100644
+--- a/rlkit/core/logging.py
++++ b/rlkit/core/logging.py
+@@ -18,7 +18,13 @@ import errno
+ import torch
+ 
+ from rlkit.core.tabulate import tabulate
++from collections import OrderedDict
+ 
++def add_prefix(log_dict: OrderedDict, prefix: str, divider=''):
++    with_prefix = OrderedDict()
++    for key, val in log_dict.items():
++        with_prefix[prefix + divider + key] = val
++    return with_prefix
+ 
+ class TerminalTablePrinter(object):
+     def __init__(self):
+diff --git a/rlkit/core/rl_algorithm.py b/rlkit/core/rl_algorithm.py
+index 2212da8..52578f1 100644
+--- a/rlkit/core/rl_algorithm.py
++++ b/rlkit/core/rl_algorithm.py
+@@ -41,9 +41,9 @@ class BaseRLAlgorithm(object, metaclass=abc.ABCMeta):
+ 
+         self.post_epoch_funcs = []
+ 
+-    def train(self, start_epoch=0):
++    def train(self,  comet_logger, start_epoch=0):
+         self._start_epoch = start_epoch
+-        self._train()
++        self._train(comet_logger)
+ 
+     def _train(self):
+         """
+@@ -51,12 +51,13 @@ class BaseRLAlgorithm(object, metaclass=abc.ABCMeta):
+         """
+         raise NotImplementedError('_train must implemented by inherited class')
+ 
+-    def _end_epoch(self, epoch):
++    def _end_epoch(self, epoch, comet_logger):
+         if not self.trainer.discrete:
+             snapshot = self._get_snapshot()
+-            logger.save_itr_params(epoch, snapshot)
++            if epoch%50==0:
++                logger.save_itr_params(epoch, snapshot)
+             gt.stamp('saving')
+-        self._log_stats(epoch)
++        self._log_stats(epoch, comet_logger)
+ 
+         for post_epoch_func in self.post_epoch_funcs:
+             post_epoch_func(self, epoch)
+@@ -78,7 +79,7 @@ class BaseRLAlgorithm(object, metaclass=abc.ABCMeta):
+             snapshot['replay_buffer/' + k] = v
+         return snapshot
+ 
+-    def _log_stats(self, epoch):
++    def _log_stats(self, epoch, comet_logger):
+         logger.log("Epoch {} finished".format(epoch), with_timestamp=True)
+ 
+         """
+@@ -120,21 +121,32 @@ class BaseRLAlgorithm(object, metaclass=abc.ABCMeta):
+             self.eval_data_collector.get_diagnostics(),
+             prefix='evaluation/',
+         )
++        # comet_logger.log_dict(self.eval_data_collector.get_diagnostics())
++
+         eval_paths = self.eval_data_collector.get_epoch_paths()
+         if hasattr(self.eval_env, 'get_diagnostics'):
+             logger.record_dict(
+                 self.eval_env.get_diagnostics(eval_paths),
+                 prefix='evaluation/',
+             )
++            # comet_logger.log_dict(self.eval_env.get_diagnostics(eval_paths))
+         logger.record_dict(
+             eval_util.get_generic_path_information(eval_paths),
+             prefix="evaluation/",
+         )
++        # comet_logger.log_dict(eval_util.get_generic_path_information(eval_paths))
+ 
+         """
+         Misc
+         """
+         gt.stamp('logging')
++        logger.get_table_dict()
++        n_comet_dict = {}
++        for k,v in logger.get_table_dict().items():
++            if k.startswith('evaluation'):
++                n_comet_dict[k] = v
++        n_comet_dict['Epoch'] = epoch
++        comet_logger.log_dict(n_comet_dict)
+         logger.record_dict(_get_epoch_timings())
+         logger.record_tabular('Epoch', epoch)
+         logger.dump_tabular(with_prefix=False, with_timestamp=False)
+diff --git a/rlkit/data_management/load_buffer.py b/rlkit/data_management/load_buffer.py
+index 9782960..395af39 100644
+--- a/rlkit/data_management/load_buffer.py
++++ b/rlkit/data_management/load_buffer.py
+@@ -13,7 +13,7 @@ def get_buffer_size(data):
+     return num_transitions
+ 
+ 
+-def add_data_to_buffer(data, replay_buffer):
++def add_data_to_buffer(data, replay_buffer, dataType="prior"):
+ 
+     for j in range(len(data)):
+         assert (len(data[j]['actions']) == len(data[j]['observations']) == len(
+@@ -28,6 +28,13 @@ def add_data_to_buffer(data, replay_buffer):
+                 data[j]['next_observations']),
+         )
+         replay_buffer.add_path(path)
++        # if j == len(data)-2 and dataType=="task":
++        #     replay_buffer.add_path(path, normalize=True)
++        # else:
++        #     replay_buffer.add_path(path)
++
++    # replay_buffer.normalize_states() # first unnormalize image then normalize over the full batch of data the during
++    # random batch call normalizing images(/255) again.
+ 
+ 
+ def load_data_from_npy(variant, expl_env, observation_key,
+@@ -51,10 +58,12 @@ def load_data_from_npy(variant, expl_env, observation_key,
+ def load_data_from_npy_chaining(variant, expl_env, observation_key,
+                                 extra_buffer_size=100):
+     with open(variant['prior_buffer'], 'rb') as f:
++        # data_prior = np.memmap(f.name, mode='r')
+         data_prior = np.load(f, allow_pickle=True)
+     with open(variant['task_buffer'], 'rb') as f:
+         data_task = np.load(f, allow_pickle=True)
+-
++    # data_prior = data_prior[:50]
++    # data_task = data_task[:50]
+     buffer_size = get_buffer_size(data_prior)
+     buffer_size += get_buffer_size(data_task)
+     buffer_size += extra_buffer_size
+@@ -85,13 +94,13 @@ def load_data_from_npy_chaining(variant, expl_env, observation_key,
+             observation_key=observation_key,
+         )
+ 
+-    add_data_to_buffer(data_prior, replay_buffer)
++    add_data_to_buffer(data_prior, replay_buffer, "prior")
+     top = replay_buffer._top
+     print('Prior data loaded from npy file', top)
+     replay_buffer._rewards[:top] = 0.0*replay_buffer._rewards[:top]
+     print('Zero-ed the rewards for prior data', top)
+ 
+-    add_data_to_buffer(data_task, replay_buffer)
++    add_data_to_buffer(data_task, replay_buffer, "task")
+     print('Task data loaded from npy file', replay_buffer._top)
+     return replay_buffer
+ 
+diff --git a/rlkit/data_management/obs_dict_replay_buffer.py b/rlkit/data_management/obs_dict_replay_buffer.py
+index 2e97da6..638e983 100644
+--- a/rlkit/data_management/obs_dict_replay_buffer.py
++++ b/rlkit/data_management/obs_dict_replay_buffer.py
+@@ -192,6 +192,7 @@ class ObsDictRelabelingBuffer(ReplayBuffer):
+                 new_next_obs_dict[goal_key][
+                 num_rollout_goals:last_env_goal_idx] = \
+                     env_goals[goal_key]
++
+         if num_future_goals > 0:
+             future_obs_idxs = []
+             for i in indices[-num_future_goals:]:
+@@ -243,6 +244,8 @@ class ObsDictRelabelingBuffer(ReplayBuffer):
+ 
+         new_obs = new_obs_dict[self.observation_key]
+         new_next_obs = new_next_obs_dict[self.observation_key]
++
++
+         batch = {
+             'observations': new_obs,
+             'actions': new_actions,
+@@ -401,6 +404,8 @@ class ObsDictReplayBuffer(ReplayBuffer):
+         obs = flatten_dict(obs, self.ob_keys_to_save + self.internal_keys)
+         next_obs = flatten_dict(next_obs,
+                                 self.ob_keys_to_save + self.internal_keys)
++        # if normalize==True:
++        #     self.normalize_states()
+         obs = preprocess_obs_dict(obs)
+         next_obs = preprocess_obs_dict(next_obs)
+ 
+@@ -488,6 +493,7 @@ class ObsDictReplayBuffer(ReplayBuffer):
+             obs = normalize_image(obs)
+             next_obs = normalize_image(next_obs)
+ 
++        # obs, next_obs, mean, std = self.normalize_states(obs, next_obs)
+         batch = {}
+         batch.update({
+             'observations': obs,
+@@ -498,6 +504,7 @@ class ObsDictReplayBuffer(ReplayBuffer):
+             'indices': np.array(indices).reshape(-1, 1),
+         })
+         return batch
++        # return batch, mean, std
+ 
+     def get_snapshot(self):
+         snapshot = super().get_snapshot()
+@@ -525,6 +532,13 @@ class ObsDictReplayBuffer(ReplayBuffer):
+     def get_diagnostics(self):
+         return {'top': self._top}
+ 
++    def normalize_states(self, obs, next_obs, eps=1e-3):
++        obs_mean = obs.mean(0, keepdims=True)
++        obs_std = obs.std(0, keepdims=True) + eps
++        obs = (obs - obs_mean) / obs_std
++        next_obs = (next_obs - obs_mean) / obs_std
++        return obs, next_obs, obs_mean, obs_std
++
+ 
+ def flatten_n(xs):
+     xs = np.asarray(xs)
+@@ -569,3 +583,4 @@ def normalize_image(image):
+ def unnormalize_image(image):
+     assert image.dtype != np.uint8
+     return np.uint8(image * 255.0)
++
+diff --git a/rlkit/samplers/data_collector/path_collector.py b/rlkit/samplers/data_collector/path_collector.py
+index 9c27cdb..fc6a334 100644
+--- a/rlkit/samplers/data_collector/path_collector.py
++++ b/rlkit/samplers/data_collector/path_collector.py
+@@ -36,7 +36,7 @@ class MdpPathCollector(PathCollector):
+             max_path_length,
+             num_steps,
+             discard_incomplete_paths,
+-            policy_fn=None,
++            policy_fn=None, mean=None, std=None
+     ):
+         paths = []
+         num_steps_collected = 0
+@@ -48,7 +48,7 @@ class MdpPathCollector(PathCollector):
+             path = rollout(
+                 self._env,
+                 self._policy,
+-                max_path_length=max_path_length_this_loop,
++                max_path_length=max_path_length_this_loop, mean=mean, std=std
+             )
+             path_len = len(path['actions'])
+             if (
+diff --git a/rlkit/samplers/rollout_functions.py b/rlkit/samplers/rollout_functions.py
+index 20839f4..6fc4982 100644
+--- a/rlkit/samplers/rollout_functions.py
++++ b/rlkit/samplers/rollout_functions.py
+@@ -1,5 +1,5 @@
+ import numpy as np
+-
++import torch
+ 
+ def multitask_rollout(
+         env,
+@@ -78,7 +78,7 @@ def rollout(
+         agent,
+         max_path_length=np.inf,
+         render=False,
+-        render_kwargs=None,
++        render_kwargs=None, mean = None, std =None
+ ):
+     """
+     The following value for the following keys will be a 2D array, with the
+@@ -108,12 +108,26 @@ def rollout(
+     path_length = 0
+     if render:
+         env.render(**render_kwargs)
++    # i=0
+     while path_length < max_path_length:
++        # if isinstance(o, tuple):
++        #     o = o[0]['image']
++        # else:
++        #     o = o['image']
++        #
+         # a, agent_info = agent.get_action(o)
+         # TODO Remove hardcoding in the following line
+-        a, agent_info = agent.get_action(o['image'])
++        # a, agent_info = agent.get_action(o['image'])
++        if mean is not None:
++            a, agent_info = agent.get_action(((o['image']-mean)/std).squeeze(0))
++        else:
++            a, agent_info = agent.get_action(o['image'])
+ 
+-        next_o, r, d, env_info = env.step(a)
++        # a = (a + np.random.normal(0, scale=env.action_space.high * 0.1, size=env.action_space.shape[0])
++        #               ).clip(env.action_space.low, env.action_space.high)
++
++
++        next_o, r, d, trunc, env_info = env.step(a)
+         observations.append(o)
+         rewards.append(r)
+         terminals.append(d)
+@@ -134,12 +148,21 @@ def rollout(
+     if len(observations.shape) == 1:
+         observations = np.expand_dims(observations, 1)
+         next_o = np.array([next_o])
+-    next_observations = np.vstack(
++    if env.spec.name == 'Widow250DoubleDrawerOpenGraspNeutral':
++        next_observations = np.vstack(
++            (
++                observations[1:, :],
++                np.expand_dims(next_o['image'], 0)
++            )
++        )
++    else:
++        next_observations = np.vstack(
+         (
+             observations[1:, :],
+             np.expand_dims(next_o, 0)
+         )
+     )
++    # np.vstack((observations[1:, :], np.expand_dims(next_o, 0)))
+     return dict(
+         observations=observations,
+         actions=actions,
+diff --git a/rlkit/torch/conv_networks.py b/rlkit/torch/conv_networks.py
+index ecb8065..4ddc75f 100644
+--- a/rlkit/torch/conv_networks.py
++++ b/rlkit/torch/conv_networks.py
+@@ -1,7 +1,10 @@
+ import torch
+ from torch import nn as nn
++from torchvision.models import vgg11, resnet18, ResNet18_Weights, VGG11_Weights, mobilenet_v3_small
++# from transformers import AutoImageProcessor
+ 
+ from rlkit.pythonplusplus import identity
++import rlkit.torch.pytorch_util as ptu
+ 
+ import numpy as np
+ 
+@@ -24,7 +27,7 @@ class CNN(nn.Module):
+             fc_normalization_type='none',
+             init_w=1e-4,
+             hidden_init=nn.init.xavier_uniform_,
+-            hidden_activation=nn.ReLU(),
++            hidden_activation=nn.ReLU(inplace=False),
+             output_activation=identity,
+             output_conv_channels=False,
+             pool_type='none',
+@@ -138,8 +141,10 @@ class CNN(nn.Module):
+ 
+         if self.image_augmentation:
+             self.augmentation_transform = RandomCrop(
+-                input_height, self.image_augmentation_padding, device='cuda')
++                input_height, self.image_augmentation_padding, device='mps') #** device='cpu'
+ 
++            # self.augmentation_transform = RandomCrop(
++            #     input_height, self.image_augmentation_padding, device='cuda')
+     def forward(self, input, return_last_activations=False):
+         conv_input = input.narrow(start=0,
+                                   length=self.conv_input_length,
+@@ -172,6 +177,7 @@ class CNN(nn.Module):
+ 
+         if return_last_activations:
+             return h
++        # print(h)
+         return self.output_activation(self.last_fc(h))
+ 
+     def apply_forward_conv(self, h):
+@@ -193,6 +199,137 @@ class CNN(nn.Module):
+         return h
+ 
+ 
++
++class Pretrained(nn.Module):
++    # TODO: remove the FC parts of this code
++    def __init__(
++            self,
++            input_width,
++            input_height,
++            input_channels,
++            output_size,
++            hidden_sizes=None,
++            added_fc_input_size=0,
++            fc_normalization_type='none',
++            output_conv_channels=False,
++            init_w=1e-4,
++            hidden_init=nn.init.xavier_uniform_,
++            hidden_activation=nn.ReLU(inplace=False),
++            output_activation=identity,
++            image_augmentation=False,
++            image_augmentation_padding=4,
++    ):
++        if hidden_sizes is None:
++            hidden_sizes = []
++        assert fc_normalization_type in {'none', 'batch', 'layer'}
++        super().__init__()
++
++        self.hidden_sizes = hidden_sizes
++        self.input_width = input_width
++        self.input_height = input_height
++        self.input_channels = input_channels
++        self.output_size = output_size
++        self.output_activation = output_activation
++        self.hidden_activation = hidden_activation
++        self.fc_normalization_type = fc_normalization_type
++        self.added_fc_input_size = added_fc_input_size
++        self.conv_input_length = self.input_width * self.input_height * self.input_channels
++        self.output_conv_channels = output_conv_channels
++        self.image_augmentation = image_augmentation
++        self.image_augmentation_padding = image_augmentation_padding
++
++        self.fc_layers = nn.ModuleList()
++        self.fc_norm_layers = nn.ModuleList()
++
++        test_mat = torch.zeros(
++            1,
++            self.input_channels,
++            self.input_width,
++            self.input_height,
++        )
++
++        weights = ResNet18_Weights.DEFAULT
++        model = resnet18(weights=weights)
++        model = nn.Sequential(*list(model.children())[:-1])
++        self.model=model
++        self.model.eval()
++
++        self.conv_output_flat_size = int(np.prod(test_mat.shape))
++        if self.output_conv_channels:
++            self.last_fc = None
++        else:
++            fc_input_size = 512
++            # used only for injecting input directly into fc layers
++            fc_input_size += added_fc_input_size
++            for idx, hidden_size in enumerate(hidden_sizes):
++                fc_layer = nn.Linear(fc_input_size, hidden_size)
++                fc_input_size = hidden_size
++
++                fc_layer.weight.data.uniform_(-init_w, init_w)
++                fc_layer.bias.data.uniform_(-init_w, init_w)
++
++                self.fc_layers.append(fc_layer)
++
++                if self.fc_normalization_type == 'batch':
++                    self.fc_norm_layers.append(nn.BatchNorm1d(hidden_size))
++                if self.fc_normalization_type == 'layer':
++                    self.fc_norm_layers.append(nn.LayerNorm(hidden_size))
++
++            self.last_fc = nn.Linear(fc_input_size, output_size)
++            self.last_fc.weight.data.uniform_(-init_w, init_w)
++            self.last_fc.bias.data.uniform_(-init_w, init_w)
++
++        if self.image_augmentation:
++            self.augmentation_transform = RandomCrop(
++                input_height, self.image_augmentation_padding, device='mps') #** device='cpu'
++
++            # self.augmentation_transform = RandomCrop(
++            #     input_height, self.image_augmentation_padding, device='cuda')
++
++
++    def forward(self, input, return_last_activations=False):
++        conv_input = input.narrow(start=0,
++                                  length=self.conv_input_length,
++                                  dim=1).contiguous()
++        # reshape from batch of flattened images into (channels, w, h)
++        h = conv_input.view(conv_input.shape[0],
++                            self.input_channels,
++                            self.input_height,
++                            self.input_width)
++
++        if h.shape[0] > 1 and self.image_augmentation:
++            # h.shape[0] > 1 ensures we apply this only during training
++            h = self.augmentation_transform(h)
++
++        h = self.model(h)
++
++        if self.output_conv_channels:
++            return h
++
++        # flatten channels for fc layers
++        h = h.view(h.size(0), -1)
++        if self.added_fc_input_size != 0:
++            extra_fc_input = input.narrow(
++                start=self.conv_input_length,
++                length=self.added_fc_input_size,
++                dim=1,
++            )
++            h = torch.cat((h, extra_fc_input), dim=1)
++        h = self.apply_forward_fc(h)
++
++        if return_last_activations:
++            return h
++        return self.output_activation(self.last_fc(h))
++
++    def apply_forward_fc(self, h):
++        for i, layer in enumerate(self.fc_layers):
++            h = layer(h)
++            if self.fc_normalization_type != 'none':
++                h = self.fc_norm_layers[i](h)
++            h = self.hidden_activation(h)
++        return h
++
++
+ class ConcatCNN(CNN):
+     """
+     Concatenate inputs along dimension and then pass through MLP.
+@@ -205,6 +342,18 @@ class ConcatCNN(CNN):
+         flat_inputs = torch.cat(inputs, dim=self.dim)
+         return super().forward(flat_inputs, **kwargs)
+ 
++class ConcatPre(Pretrained):
++    """
++    Concatenate inputs along dimension and then pass through MLP.
++    """
++    def __init__(self, *args, dim=1, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.dim = dim
++
++    def forward(self, *inputs, **kwargs):
++        flat_inputs = torch.cat(inputs, dim=self.dim)
++        return super().forward(flat_inputs, **kwargs)
++
+ 
+ class TwoHeadDCNN(nn.Module):
+     def __init__(
+diff --git a/rlkit/torch/core.py b/rlkit/torch/core.py
+index a94a455..96c2a65 100644
+--- a/rlkit/torch/core.py
++++ b/rlkit/torch/core.py
+@@ -21,6 +21,11 @@ def eval_np(module, *args, **kwargs):
+     else:
+         return np_ify(outputs)
+ 
++def elem_or_tuple_to_numpy(elem_or_tuple):
++    if isinstance(elem_or_tuple, tuple):
++        return tuple(np_ify(x) for x in elem_or_tuple)
++    else:
++        return np_ify(elem_or_tuple)
+ 
+ def torch_ify(np_array_or_other):
+     if isinstance(np_array_or_other, np.ndarray):
+@@ -46,7 +51,7 @@ def _elem_or_tuple_to_variable(elem_or_tuple):
+ 
+ def _filter_batch(np_batch):
+     for k, v in np_batch.items():
+-        if v.dtype == np.bool:
++        if v.dtype == np.bool_:  # **
+             yield k, v.astype(int)
+         else:
+             yield k, v
+diff --git a/rlkit/torch/distributions.py b/rlkit/torch/distributions.py
+index 1588a2f..7dbdb41 100644
+--- a/rlkit/torch/distributions.py
++++ b/rlkit/torch/distributions.py
+@@ -1,6 +1,96 @@
+ import torch
+ from torch.distributions import Distribution, Normal
+ import rlkit.torch.pytorch_util as ptu
++import torch
++from torch.distributions import Categorical, OneHotCategorical, kl_divergence
++from torch.distributions import Normal as TorchNormal
++from torch.distributions import Beta as TorchBeta
++from torch.distributions import Distribution as TorchDistribution
++from torch.distributions import Bernoulli as TorchBernoulli
++from torch.distributions import Independent as TorchIndependent
++from torch.distributions.utils import _sum_rightmost
++from rlkit.core.eval_util import create_stats_ordered_dict
++import rlkit.torch.pytorch_util as ptu
++import numpy as np
++from collections import OrderedDict
++
++
++class Distribution(TorchDistribution):
++    def sample_and_logprob(self):
++        s = self.sample()
++        log_p = self.log_prob(s)
++        return s, log_p
++
++    def rsample_and_logprob(self):
++        s = self.rsample()
++        log_p = self.log_prob(s)
++        return s, log_p
++
++    def mle_estimate(self):
++        return self.mean
++
++    def get_diagnostics(self):
++        return {}
++
++
++class TorchDistributionWrapper(Distribution):
++    def __init__(self, distribution: TorchDistribution):
++        self.distribution = distribution
++
++    @property
++    def batch_shape(self):
++        return self.distribution.batch_shape
++
++    @property
++    def event_shape(self):
++        return self.distribution.event_shape
++
++    @property
++    def arg_constraints(self):
++        return self.distribution.arg_constraints
++
++    @property
++    def support(self):
++        return self.distribution.support
++
++    @property
++    def mean(self):
++        return self.distribution.mean
++
++    @property
++    def variance(self):
++        return self.distribution.variance
++
++    @property
++    def stddev(self):
++        return self.distribution.stddev
++
++    def sample(self, sample_size=torch.Size()):
++        return self.distribution.sample(sample_shape=sample_size)
++
++    def rsample(self, sample_size=torch.Size()):
++        return self.distribution.rsample(sample_shape=sample_size)
++
++    def log_prob(self, value):
++        return self.distribution.log_prob(value)
++
++    def cdf(self, value):
++        return self.distribution.cdf(value)
++
++    def icdf(self, value):
++        return self.distribution.icdf(value)
++
++    def enumerate_support(self, expand=True):
++        return self.distribution.enumerate_support(expand=expand)
++
++    def entropy(self):
++        return self.distribution.entropy()
++
++    def perplexity(self):
++        return self.distribution.perplexity()
++
++    def __repr__(self):
++        return 'Wrapped ' + self.distribution.__repr__()
+ 
+ 
+ class TanhNormal(Distribution):
+@@ -75,3 +165,28 @@ class TanhNormal(Distribution):
+             return torch.tanh(z), z
+         else:
+             return torch.tanh(z)
++
++class MultivariateDiagonalNormal(TorchDistributionWrapper):
++    from torch.distributions import constraints
++    arg_constraints = {'loc': constraints.real, 'scale': constraints.positive}
++
++    def __init__(self, loc, scale_diag, reinterpreted_batch_ndims=1):
++        dist = TorchIndependent(TorchNormal(loc, scale_diag),
++                           reinterpreted_batch_ndims=reinterpreted_batch_ndims)
++        super().__init__(dist)
++
++    def get_diagnostics(self):
++        stats = OrderedDict()
++        stats.update(create_stats_ordered_dict(
++            'mean',
++            ptu.get_numpy(self.mean),
++            # exclude_max_min=True,
++        ))
++        stats.update(create_stats_ordered_dict(
++            'std',
++            ptu.get_numpy(self.distribution.stddev),
++        ))
++        return stats
++
++    def __repr__(self):
++        return self.distribution.base_dist.__repr__()
+diff --git a/rlkit/torch/networks.py b/rlkit/torch/networks.py
+index f8be3d8..624b5dc 100644
+--- a/rlkit/torch/networks.py
++++ b/rlkit/torch/networks.py
+@@ -114,6 +114,14 @@ class MlpPolicy(Mlp, Policy):
+     def get_actions(self, obs):
+         return eval_np(self, obs)
+ 
++class LinearTransform(nn.Module):
++    def __init__(self, m, b):
++        super().__init__()
++        self.m = m
++        self.b = b
++
++    def __call__(self, t):
++        return self.m * t + self.b
+ 
+ class TanhMlpPolicy(MlpPolicy):
+     """
+diff --git a/rlkit/torch/pytorch_util.py b/rlkit/torch/pytorch_util.py
+index 652dcd9..37bf2eb 100644
+--- a/rlkit/torch/pytorch_util.py
++++ b/rlkit/torch/pytorch_util.py
+@@ -44,7 +44,7 @@ def fanin_init_weights_like(tensor):
+ GPU wrappers
+ """
+ 
+-_use_gpu = False
++_use_gpu = True
+ device = None
+ _gpu_id = 0
+ 
+@@ -55,7 +55,8 @@ def set_gpu_mode(mode, gpu_id=0):
+     global _gpu_id
+     _gpu_id = gpu_id
+     _use_gpu = mode
+-    device = torch.device("cuda:" + str(gpu_id) if _use_gpu else "cpu")
++    # device = torch.device("cuda:" + str(gpu_id) if _use_gpu else "cpu")
++    device = torch.device("mps:" + str(gpu_id) if _use_gpu else "cpu")
+ 
+ 
+ def gpu_enabled():
+@@ -63,7 +64,8 @@ def gpu_enabled():
+ 
+ 
+ def set_device(gpu_id):
+-    torch.cuda.set_device(gpu_id)
++    torch.mps.set_device(gpu_id)
++    # torch.cuda.set_device(gpu_id)
+ 
+ 
+ # noinspection PyPep8Naming
+@@ -82,6 +84,7 @@ def get_numpy(tensor):
+ 
+ 
+ def zeros(*sizes, torch_device=None, **kwargs):
++    # torch_device='cpu'
+     if torch_device is None:
+         torch_device = device
+     return torch.zeros(*sizes, **kwargs, device=torch_device)
+diff --git a/rlkit/torch/sac/cql.py b/rlkit/torch/sac/cql.py
+index 804279d..2bfd3e0 100644
+--- a/rlkit/torch/sac/cql.py
++++ b/rlkit/torch/sac/cql.py
+@@ -109,7 +109,7 @@ class CQLTrainer(TorchTrainer):
+         self._num_q_update_steps = 0
+         self._num_policy_update_steps = 0
+         self._num_policy_steps = 1
+-        
++        self.epoch = 0
+         self.num_qs = num_qs
+ 
+         ## min Q
+@@ -187,7 +187,7 @@ class CQLTrainer(TorchTrainer):
+             conventionally, there's not much difference in performance with having 20k 
+             gradient steps here, or not having it
+             """
+-            policy_log_prob = self.policy.log_prob(obs, actions)
++            policy_log_prob = self.policy.log_prob(obs, actions) #**
+             policy_loss = (alpha * log_pi - policy_log_prob).mean()
+         
+         """
+@@ -213,7 +213,7 @@ class CQLTrainer(TorchTrainer):
+                     self.target_qf2(next_obs, new_next_actions),
+                 )
+             
+-            if not self.deterministic_backup:
++            if not self.deterministic_backup: #**
+                 target_q_values = target_q_values - alpha * new_log_pi
+         
+         if self.max_q_backup:
+@@ -231,7 +231,8 @@ class CQLTrainer(TorchTrainer):
+             qf2_loss = self.qf_criterion(q2_pred, q_target)
+ 
+         ## add CQL
+-        random_actions_tensor = torch.FloatTensor(q2_pred.shape[0] * self.num_random, actions.shape[-1]).uniform_(-1, 1).cuda()
++        random_actions_tensor = torch.FloatTensor(q2_pred.shape[0] * self.num_random, actions.shape[-1]).uniform_(-1, 1).to('mps')
++        # random_actions_tensor = torch.FloatTensor(q2_pred.shape[0] * self.num_random, actions.shape[-1]).uniform_(-1, 1).cpu() #** .cpu() .cuda()
+         curr_actions_tensor, curr_log_pis = self._get_policy_actions(obs, num_actions=self.num_random, network=self.policy)
+         new_curr_actions_tensor, new_log_pis = self._get_policy_actions(next_obs, num_actions=self.num_random, network=self.policy)
+         q1_rand = self._get_tensor_values(obs, random_actions_tensor, network=self.qf1)
+@@ -287,7 +288,8 @@ class CQLTrainer(TorchTrainer):
+         """
+         Update networks
+         """
+-        # Update the Q-functions iff 
++        # Update the Q-functions iff
++        torch.autograd.set_detect_anomaly(True)
+         self._num_q_update_steps += 1
+         self.qf1_optimizer.zero_grad()
+         qf1_loss.backward(retain_graph=True)
+@@ -408,7 +410,6 @@ class CQLTrainer(TorchTrainer):
+                 self.eval_statistics['min_q2_loss'] = ptu.get_numpy(min_qf2_loss).mean()
+                 self.eval_statistics['threshold action gap'] = self.target_action_gap
+                 self.eval_statistics['alpha prime loss'] = alpha_prime_loss.item()
+-            
+         self._n_train_steps_total += 1
+ 
+     def get_diagnostics(self):
+@@ -416,6 +417,7 @@ class CQLTrainer(TorchTrainer):
+ 
+     def end_epoch(self, epoch):
+         self._need_to_update_eval_statistics = True
++        self.epoch = epoch
+ 
+     @property
+     def networks(self):
+diff --git a/rlkit/torch/sac/policies.py b/rlkit/torch/sac/policies.py
+index 89cc037..9cb5ac3 100644
+--- a/rlkit/torch/sac/policies.py
++++ b/rlkit/torch/sac/policies.py
+@@ -3,9 +3,12 @@ import torch
+ from torch import nn as nn
+ 
+ from rlkit.policies.base import ExplorationPolicy, Policy
+-from rlkit.torch.core import eval_np
+-from rlkit.torch.distributions import TanhNormal
++from rlkit.torch.core import eval_np, elem_or_tuple_to_numpy, torch_ify
++from rlkit.torch.distributions import Normal,TanhNormal
+ from rlkit.torch.networks import Mlp
++from rlkit.torch.distributions import MultivariateDiagonalNormal
++import rlkit.torch.pytorch_util as ptu
++
+ 
+ LOG_SIG_MAX = 2
+ LOG_SIG_MIN = -5
+@@ -76,7 +79,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
+         return eval_np(self, obs_np, deterministic=deterministic)[0]
+ 
+     def log_prob(self, obs, actions):
+-        raw_actions = atanh(actions)
++        raw_actions = atanh(actions) # inverse of tanh
+ 
+         if self.obs_processor is None:
+             h = obs
+@@ -99,6 +102,37 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
+         log_prob = tanh_normal.log_prob(value=actions, pre_tanh_value=raw_actions)
+         return log_prob.sum(-1)
+ 
++    def sample_and_logprob(self):
++        s = self.sample()
++        log_p = self.log_prob(s)
++        return s, log_p
++
++    def rsample(self, normal_mean = 0, normal_std = 1, return_pretanh_value=False):
++        """
++        Sampling in the reparameterization case.
++        let's say the normal_mean is 0 and the normal_std is 1
++        """
++        z = (
++                normal_mean +
++                normal_std *
++                Normal(
++                    ptu.zeros(normal_mean.size()),
++                    ptu.ones(normal_std.size())
++                ).sample()
++        )
++        z.requires_grad_()
++
++        if return_pretanh_value:
++            return torch.tanh(z), z
++        else:
++            return torch.tanh(z)
++
++    def mle_estimate(self):
++        return self.mean
++
++    def get_diagnostics(self):
++        return {}
++
+     def forward(
+             self,
+             obs,
+@@ -170,3 +204,83 @@ class MakeDeterministic(nn.Module, Policy):
+     def get_action(self, observation):
+         return self.stochastic_policy.get_action(observation,
+                                                  deterministic=True)
++
++class GaussianPolicy(Mlp, ExplorationPolicy): # ExplorationPolicy inherits from Policy
++    def __init__(
++            self,
++            hidden_sizes,
++            obs_dim,
++            action_dim,
++            std=None,
++            init_w=1e-3,
++            min_log_std=None,
++            max_log_std=None,
++            std_architecture="shared",
++            **kwargs
++    ):
++        super().__init__(
++            hidden_sizes,
++            input_size=obs_dim,
++            output_size=action_dim,
++            init_w=init_w,
++            output_activation=torch.tanh,
++            **kwargs
++        )
++        self.min_log_std = min_log_std
++        self.max_log_std = max_log_std
++        self.log_std = None
++        self.std = std
++        self.std_architecture = std_architecture
++        if std is None:
++            if self.std_architecture == "shared":
++                last_hidden_size = obs_dim
++                if len(hidden_sizes) > 0:
++                    last_hidden_size = hidden_sizes[-1]
++                self.last_fc_log_std = nn.Linear(last_hidden_size, action_dim)
++                self.last_fc_log_std.weight.data.uniform_(-init_w, init_w)
++                self.last_fc_log_std.bias.data.uniform_(-init_w, init_w)
++            elif self.std_architecture == "values":
++                self.log_std_logits = nn.Parameter(
++                    ptu.zeros(action_dim, requires_grad=True))
++            else:
++                raise ValueError(self.std_architecture)
++        else:
++            self.log_std = np.log(std)
++            assert LOG_SIG_MIN <= self.log_std <= LOG_SIG_MAX
++
++    # Inheritance from TorchStochasticPolicy
++    def get_action(self, obs_np, ):
++        actions = self.get_actions(obs_np[None])
++        return actions[0, :], {}
++
++    def get_actions(self, obs_np, ):
++        dist = self._get_dist_from_np(obs_np)
++        actions = dist.sample()
++        return elem_or_tuple_to_numpy(actions)
++
++    def _get_dist_from_np(self, *args, **kwargs):
++        torch_args = tuple(torch_ify(x) for x in args)
++        torch_kwargs = {k: torch_ify(v) for k, v in kwargs.items()}
++        dist = self(*torch_args, **torch_kwargs)
++        return dist
++    def forward(self, obs):
++        h = obs
++        for i, fc in enumerate(self.fcs):
++            h = self.hidden_activation(fc(h))
++        preactivation = self.last_fc(h)
++        mean = self.output_activation(preactivation)
++        if self.std is None:
++            if self.std_architecture == "shared":
++                log_std = torch.sigmoid(self.last_fc_log_std(h))
++            elif self.std_architecture == "values":
++                log_std = torch.sigmoid(self.log_std_logits)
++            else:
++                raise ValueError(self.std_architecture)
++            log_std = self.min_log_std + log_std * (
++                        self.max_log_std - self.min_log_std)
++            std = torch.exp(log_std)
++        else:
++            std = torch.from_numpy(np.array([self.std, ])).float().to(
++                ptu.device)
++
++        return MultivariateDiagonalNormal(mean, std)
+diff --git a/rlkit/torch/td3/td3.py b/rlkit/torch/td3/td3.py
+index 98b0fa5..205fbff 100644
+--- a/rlkit/torch/td3/td3.py
++++ b/rlkit/torch/td3/td3.py
+@@ -8,6 +8,7 @@ from torch import nn as nn
+ import rlkit.torch.pytorch_util as ptu
+ from rlkit.core.eval_util import create_stats_ordered_dict
+ from rlkit.torch.torch_rl_algorithm import TorchTrainer
++import torch.nn.functional as F
+ 
+ 
+ class TD3Trainer(TorchTrainer):
+@@ -17,6 +18,7 @@ class TD3Trainer(TorchTrainer):
+ 
+     def __init__(
+             self,
++            env,
+             policy,
+             qf1,
+             qf2,
+@@ -29,8 +31,8 @@ class TD3Trainer(TorchTrainer):
+             discount=0.99,
+             reward_scale=1.0,
+ 
+-            policy_learning_rate=1e-3,
+-            qf_learning_rate=1e-3,
++            policy_learning_rate=1e-4, #**
++            qf_learning_rate=1e-4,    #**
+             policy_and_target_update_period=2,
+             tau=0.005,
+             qf_criterion=None,
+@@ -71,6 +73,8 @@ class TD3Trainer(TorchTrainer):
+         self.eval_statistics = OrderedDict()
+         self._n_train_steps_total = 0
+         self._need_to_update_eval_statistics = True
++        self.discrete=False
++        self.env = env
+ 
+     def train_from_torch(self, batch):
+         rewards = batch['rewards']
+@@ -82,8 +86,13 @@ class TD3Trainer(TorchTrainer):
+         """
+         Critic operations.
+         """
++        self.alpha = 2.5
++        action_scale = torch.from_numpy((self.env.action_space.high - self.env.action_space.low) / 2).to(ptu.device)
++        action_bias = torch.from_numpy((self.env.action_space.low + self.env.action_space.high) / 2).to(ptu.device)
++        next_actions, n_ac_mean, *_ = self.target_policy(next_obs, deterministic=True)
++
++        # next_actions = next_actions * action_scale + action_bias #**
+ 
+-        next_actions = self.target_policy(next_obs)
+         noise = ptu.randn(next_actions.shape) * self.target_policy_noise
+         noise = torch.clamp(
+             noise,
+@@ -91,6 +100,7 @@ class TD3Trainer(TorchTrainer):
+             self.target_policy_noise_clip
+         )
+         noisy_next_actions = next_actions + noise
++        # noisy_next_actions = n_ac_mean + noise
+ 
+         target_q1_values = self.target_qf1(next_obs, noisy_next_actions)
+         target_q2_values = self.target_qf2(next_obs, noisy_next_actions)
+@@ -119,9 +129,15 @@ class TD3Trainer(TorchTrainer):
+ 
+         policy_actions = policy_loss = None
+         if self._n_train_steps_total % self.policy_and_target_update_period == 0:
+-            policy_actions = self.policy(obs)
++
++            policy_actions, *_ = self.policy(obs, deterministic=True)
++
++            policy_actions = policy_actions * action_scale + action_bias
++
+             q_output = self.qf1(obs, policy_actions)
+-            policy_loss = - q_output.mean()
++            lmbda = self.alpha / q_output.abs().mean().detach()
++            # policy_loss = - q_output.mean()
++            policy_loss = -lmbda * q_output.mean() + F.mse_loss(policy_actions, actions)
+ 
+             self.policy_optimizer.zero_grad()
+             policy_loss.backward()
+@@ -134,15 +150,20 @@ class TD3Trainer(TorchTrainer):
+         if self._need_to_update_eval_statistics:
+             self._need_to_update_eval_statistics = False
+             if policy_loss is None:
+-                policy_actions = self.policy(obs)
++                policy_actions, *_ = self.policy(obs, deterministic=True)
++                policy_actions = policy_actions * action_scale + action_bias
++
+                 q_output = self.qf1(obs, policy_actions)
+-                policy_loss = - q_output.mean()
++                lmbda = self.alpha / q_output.abs().mean().detach()
++                # policy_loss = - q_output.mean()
++                policy_loss = -lmbda * q_output.mean() + F.mse_loss(policy_actions, actions)
+ 
+             self.eval_statistics['QF1 Loss'] = np.mean(ptu.get_numpy(qf1_loss))
+             self.eval_statistics['QF2 Loss'] = np.mean(ptu.get_numpy(qf2_loss))
+             self.eval_statistics['Policy Loss'] = np.mean(ptu.get_numpy(
+                 policy_loss
+             ))
++            self.eval_statistics['lmbda'] = lmbda # to check if we need to change alpha as well
+             self.eval_statistics.update(create_stats_ordered_dict(
+                 'Q1 Predictions',
+                 ptu.get_numpy(q1_pred),
+diff --git a/rlkit/util/video.py b/rlkit/util/video.py
+index ce20243..1a4783a 100644
+--- a/rlkit/util/video.py
++++ b/rlkit/util/video.py
+@@ -36,6 +36,7 @@ def dump_video_basic(video_dir, paths):
+         frame_list = []
+         for frame in video:
+             # TODO(avi) Figure out why this hack is needed
++            # ** for env=> Widow250DoubleDrawerOpenGraspNeutral
+             if isinstance(frame, np.ndarray):
+                 frame_list.append(frame[0]['image'])
+             else:
