@@ -80,16 +80,3 @@ of RL functionality, and the saved videos can still be viewed. However, we will 
 - There is a torch checkpoint loading warning for online fine-tuning experiments.
 This also does not effect functionality as long as the correct checkpoints are 
 being loaded. We plan to look into this as well. 
-
-
-## TODO
-### High priority
-- [ ] Remove hard-coded image key in line 114 in `rlkit/samplers/rollout_functions.py`
-- [ ] Fix OpenCV/ffmpeg video saving warning - just need to switch to a difference codec. 
-- [ ] Fix torch checkpoint loading warning -- maybe explicitly saving all the networks and optimizer instead of the trainer object can help here. 
-
-### Soon
-- [ ] Clean up `rlkit/data_management/load_buffer.py`
-- [ ] `ObsDictReplayBuffer` and `ObsDictRelabelingBuffer` share a lot of code, but are currently implemented independently.
-- [ ] Hard-coded `.cuda()` in line 234 in `rlkit/torch/sac/cql.py`
-- [ ] Perhaps the `if` statement (line 437) for image format conversion is a bit too hacky in `ObsDictReplayBuffer`. 
