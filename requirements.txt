@@ -109,8 +109,8 @@ rpds-py
 scikit-build 
 scipy
 Send2Trash  
-#setuptools
-#setuptools-scm
+setuptools>=78.1.1
+setuptools-scm
 simplegeneric  
 singledispatch
 six
