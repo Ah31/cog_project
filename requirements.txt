@@ -135,5 +135,6 @@ wcwidth
 webencodings  
 websocket-client 
 wheel
-zipp  
+zipp>=3.19.1
+ 
 
